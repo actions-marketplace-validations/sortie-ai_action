@@ -1,0 +1,110 @@
+name: Sortie Action
+description: Run Sortie once with a task and let the coding agent your workflow file selects turn it into a reviewable change.
+branding:
+  icon: play-circle
+  color: blue
+
+inputs:
+  workflow:
+    description: Path to the workflow file in the repository
+    required: true
+  task:
+    description: Task text the agent receives as the work item's description.
+    required: false
+    default: ''
+  task-file:
+    description: Path to a file holding the task text, for input too large or too raw for an expression, such as a CI log.
+    required: false
+    default: ''
+  title:
+    description: The work item's title, which prompt templates and dispatch rule title phrases read
+    required: false
+    default: ''
+  labels:
+    description: Comma-separated labels on the work item, so a dispatch rule or stage label can select the agent and prompt template for this task
+    required: false
+    default: ''
+  version:
+    description: Sortie version to install, for example `v1.30.0`
+    required: false
+    default: latest
+  verify-attestation:
+    description: Verify the downloaded release asset against its GitHub attestation; checksum verification always runs
+    required: false
+    default: 'true'
+
+outputs:
+  exit-code:
+    description: The exit status of `sortie --once`
+    value: ${{ steps.run.outputs.exit-code }}
+  outcome:
+    description: How the task's last attempt ended, in the values `after_run` hooks receive in `SORTIE_RUN_OUTCOME`
+    value: ${{ steps.run.outputs.outcome }}
+
+runs:
+  using: composite
+  steps:
+    - name: Prepare
+      id: prepare
+      shell: bash
+      env:
+        SA_WORKFLOW: ${{ inputs.workflow }}
+        SA_TASK: ${{ inputs.task }}
+        SA_TASK_FILE: ${{ inputs.task-file }}
+        SA_VERSION: ${{ inputs.version }}
+        SA_VERIFY_ATTESTATION: ${{ inputs.verify-attestation }}
+        GH_TOKEN: ${{ github.server_url == 'https://github.com' && github.token || '' }}
+      run: bash "$GITHUB_ACTION_PATH/scripts/prepare.sh"
+
+    - name: Restore Sortie archive
+      id: restore
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ${{ steps.prepare.outputs.cache-dir }}
+        key: sortie-${{ steps.prepare.outputs.tag }}-${{ runner.os }}-${{ runner.arch }}
+
+    - name: Install Sortie
+      id: install-posix
+      if: runner.os != 'Windows'
+      shell: bash
+      env:
+        SA_TAG: ${{ steps.prepare.outputs.tag }}
+        SA_ARCHIVE: ${{ steps.prepare.outputs.archive }}
+        SA_CACHE_DIR: ${{ steps.prepare.outputs.cache-dir }}
+        SA_BIN_DIR: ${{ steps.prepare.outputs.bin-dir }}
+        SA_VERIFY: ${{ steps.prepare.outputs.verify }}
+        GH_TOKEN: ${{ github.server_url == 'https://github.com' && github.token || '' }}
+      run: bash "$GITHUB_ACTION_PATH/scripts/install.sh"
+
+    - name: Install Sortie
+      id: install-windows
+      if: runner.os == 'Windows'
+      shell: pwsh
+      env:
+        SA_TAG: ${{ steps.prepare.outputs.tag }}
+        SA_ARCHIVE: ${{ steps.prepare.outputs.archive }}
+        SA_CACHE_DIR: ${{ steps.prepare.outputs.cache-dir }}
+        SA_BIN_DIR: ${{ steps.prepare.outputs.bin-dir }}
+        SA_VERIFY: ${{ steps.prepare.outputs.verify }}
+        GH_TOKEN: ${{ github.server_url == 'https://github.com' && github.token || '' }}
+      run: '& "$env:GITHUB_ACTION_PATH/scripts/install.ps1"'
+
+    - name: Save Sortie archive
+      id: save
+      if: steps.restore.outputs.cache-hit != 'true'
+      uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ${{ steps.prepare.outputs.cache-dir }}
+        key: sortie-${{ steps.prepare.outputs.tag }}-${{ runner.os }}-${{ runner.arch }}
+
+    - name: Run Sortie
+      id: run
+      shell: bash
+      env:
+        SA_BIN: ${{ steps.install-posix.outputs.bin || steps.install-windows.outputs.bin }}
+        SA_WORKFLOW: ${{ steps.prepare.outputs.workflow }}
+        SA_TASK_FILE: ${{ steps.prepare.outputs.task-file }}
+        SA_TASK: ${{ inputs.task }}
+        SA_TITLE: ${{ inputs.title }}
+        SA_LABELS: ${{ inputs.labels }}
+      run: exec bash "$GITHUB_ACTION_PATH/scripts/run.sh"

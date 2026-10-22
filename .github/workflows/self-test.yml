@@ -1,0 +1,204 @@
+name: Self-test
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions: {}
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  version:
+    name: Version (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, workflow: testdata/WORKFLOW.md }
+          - { os: ubuntu-24.04-arm, workflow: testdata/WORKFLOW.md }
+          - { os: macos-latest, workflow: testdata/WORKFLOW.md }
+          - { os: windows-latest, workflow: testdata/WORKFLOW.windows.md }
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Read the minimum version
+        id: min
+        run: |
+          version=$(grep -m1 -E '^(readonly )?MIN_SORTIE_VERSION=' scripts/prepare.sh | grep -oE 'v[0-9]+\.[0-9]+\.[0-9]+' | head -n1)
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Install the minimum version
+        uses: ./ # zizmor: ignore[self-repository] the checkout under test is the subject
+        env:
+          SORTIE_TEST_DIR: ${{ runner.temp }}-version
+        with:
+          workflow: ${{ matrix.workflow }}
+          task: Say hello
+          version: ${{ steps.min.outputs.version }}
+
+      - name: Check the installed version equals the request
+        env:
+          MIN: ${{ steps.min.outputs.version }}
+        run: |
+          got=$(sortie --version | awk '{print $2}' | tr -d '\r')
+          [ "$got" = "${MIN#v}" ] || { echo "installed $got, want ${MIN#v}"; exit 1; }
+
+      - name: Install with the version omitted
+        uses: ./ # zizmor: ignore[self-repository] the checkout under test is the subject
+        env:
+          SORTIE_TEST_DIR: ${{ runner.temp }}-version
+        with:
+          workflow: ${{ matrix.workflow }}
+          task: Say hello
+
+      - name: Check the default is at least the minimum
+        env:
+          MIN: ${{ steps.min.outputs.version }}
+        run: |
+          got=$(sortie --version | awk '{print $2}' | tr -d '\r')
+          lowest=$(printf '%s\n%s\n' "${MIN#v}" "$got" | sort -t. -k1,1n -k2,2n -k3,3n | head -n1)
+          [ "$lowest" = "${MIN#v}" ] || { echo "installed $got, older than ${MIN#v}"; exit 1; }
+
+  behavior:
+    name: Behavior (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, workflow: testdata/WORKFLOW.md }
+          - { os: windows-latest, workflow: testdata/WORKFLOW.windows.md }
+    env:
+      PAYLOAD: "a\"b\\c $(touch /tmp/sa-canary) `touch /tmp/sa-canary`\tt\rc\r\nl\n😀"
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Run the default task
+        id: ok
+        uses: ./ # zizmor: ignore[self-repository] the checkout under test is the subject
+        continue-on-error: true
+        env:
+          SORTIE_TEST_DIR: ${{ runner.temp }}-p4
+        with:
+          workflow: ${{ matrix.workflow }}
+          task: Say hello
+
+      - name: Run a task labeled fail
+        id: failing
+        uses: ./ # zizmor: ignore[self-repository] the checkout under test is the subject
+        continue-on-error: true
+        env:
+          SORTIE_TEST_DIR: ${{ runner.temp }}-p4
+        with:
+          workflow: ${{ matrix.workflow }}
+          task: Say hello
+          labels: fail
+
+      - name: Run a task the workflow never dispatches
+        id: inactive
+        uses: ./ # zizmor: ignore[self-repository] the checkout under test is the subject
+        continue-on-error: true
+        env:
+          SORTIE_TEST_DIR: ${{ runner.temp }}-p4
+        with:
+          workflow: testdata/WORKFLOW.inactive.md
+          task: Say hello
+
+      - name: Check step results and outputs
+        env:
+          OK: ${{ steps.ok.outcome }}/${{ steps.ok.outputs.exit-code }}/${{ steps.ok.outputs.outcome }}
+          FAILING: ${{ steps.failing.outcome }}/${{ steps.failing.outputs.exit-code }}/${{ steps.failing.outputs.outcome }}
+          INACTIVE: ${{ steps.inactive.outcome }}/${{ steps.inactive.outputs.exit-code }}/${{ steps.inactive.outputs.outcome }}
+        run: |
+          check() { [ "$2" = "$3" ] || { echo "$1: got '$2', want '$3'"; exit 1; }; }
+          check default "$OK" success/0/succeeded
+          check fail "$FAILING" failure/2/failed
+          check inactive "$INACTIVE" failure/0/
+
+      - name: Write the payload file
+        run: printf '%s' "$PAYLOAD" > "$RUNNER_TEMP/payload.txt"
+
+      - name: Run the payload as task text
+        uses: ./ # zizmor: ignore[self-repository] the checkout under test is the subject
+        env:
+          SORTIE_TEST_DIR: ${{ runner.temp }}-p5task
+        with:
+          workflow: ${{ matrix.workflow }}
+          task: ${{ env.PAYLOAD }}
+
+      - name: Run the payload through a task file
+        uses: ./ # zizmor: ignore[self-repository] the checkout under test is the subject
+        env:
+          SORTIE_TEST_DIR: ${{ runner.temp }}-p5file
+        with:
+          workflow: ${{ matrix.workflow }}
+          task-file: ${{ runner.temp }}/payload.txt
+
+      - name: Check the payload stayed data
+        run: |
+          want=$(base64 -w0 "$RUNNER_TEMP/payload.txt")
+          for suffix in p5task p5file; do
+            got=$(jq -r '.[0].description | @base64' "${RUNNER_TEMP}-${suffix}/task.json" | tr -d '\r\n')
+            [ "$got" = "$want" ] || { echo "$suffix: description differs from the payload"; exit 1; }
+          done
+          [ ! -e /tmp/sa-canary ] || { echo "payload text was executed"; exit 1; }
+
+      - name: Check no state reached the checkout
+        run: |
+          for f in testdata/.sortie.db*; do
+            [ ! -e "$f" ] || { echo "$f exists"; exit 1; }
+          done
+          [ -z "$(git status --porcelain)" ] || { git status --porcelain; exit 1; }
+
+  cancel:
+    name: Cancel (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, workflow: testdata/WORKFLOW.md }
+          - { os: macos-latest, workflow: testdata/WORKFLOW.md }
+          - { os: windows-latest, workflow: testdata/WORKFLOW.windows.md }
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Run a task that outlasts the step timeout
+        uses: ./ # zizmor: ignore[self-repository] the checkout under test is the subject
+        timeout-minutes: 1
+        continue-on-error: true
+        env:
+          SORTIE_TEST_DIR: ${{ runner.temp }}-p7
+        with:
+          workflow: ${{ matrix.workflow }}
+          task: Say hello
+          labels: slow
+
+      - name: Check the after_run hook saw the cancellation
+        if: always()
+        run: |
+          marker=$(tr -d '\r' < "${RUNNER_TEMP}-p7/outcome.txt")
+          [ "$marker" = cancelled ] || { echo "after_run marker is '$marker', want cancelled"; exit 1; }
