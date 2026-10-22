@@ -1,0 +1,99 @@
+name: Cross-repository docs
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sortie-cross-repo-docs
+  cancel-in-progress: false
+
+env:
+  DOCS_OWNER: my-org
+  DOCS_REPO: docs
+
+jobs:
+  cross-repo-docs:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+      # The job token reads a public repository. A token for a private one
+      # would have to exist before Sortie starts, where it can expire.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ env.DOCS_OWNER }}/${{ env.DOCS_REPO }}
+          path: docs-repo
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+      - name: Install Claude Code
+        run: npm install -g --ignore-scripts=false @anthropic-ai/claude-code
+
+      - uses: sortie-ai/action@v1
+        id: sortie
+        with:
+          workflow: .github/sortie/cross-repo-docs/WORKFLOW.md
+          title: Document the latest change of ${{ github.repository }}
+          task: |
+            Repository ${{ github.repository }} received commit
+            ${{ github.sha }} on its default branch.
+            Update the documentation repository so that it describes what
+            this change did.
+
+            Commit message:
+            ${{ github.event.head_commit.message }}
+          version: v1.30.0
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          SORTIE_CHECKOUT_DIR: ${{ github.workspace }}/docs-repo
+          SORTIE_SOURCE_DIR: ${{ github.workspace }}
+
+      # An installation token lives one hour, so it is created here and not
+      # before Sortie starts, when it could be dead by the time of the push.
+      - name: Create the App installation token
+        id: app-token
+        if: steps.sortie.outputs.outcome == 'succeeded'
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          client-id: ${{ secrets.APP_CLIENT_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          owner: ${{ env.DOCS_OWNER }}
+          repositories: ${{ env.DOCS_REPO }}
+          permission-contents: write
+          permission-pull-requests: write
+
+      - name: Publish the result
+        if: steps.sortie.outputs.outcome == 'succeeded'
+        working-directory: docs-repo
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          GH_REPO: ${{ env.DOCS_OWNER }}/${{ env.DOCS_REPO }}
+          BRANCH: sortie/gha-${{ github.run_id }}-${{ github.run_attempt }}
+          SOURCE_SHA: ${{ github.sha }}
+          SOURCE_COMMIT_URL: ${{ github.server_url }}/${{ github.repository }}/commit/${{ github.sha }}
+        run: |
+          set -euo pipefail
+          git_remote() {
+            git -c credential.helper= -c 'credential.helper=!gh auth git-credential' "$@"
+          }
+
+          if ! git rev-parse --verify --quiet "refs/heads/$BRANCH" > /dev/null ||
+            [ "$(git rev-list --count "HEAD..refs/heads/$BRANCH")" = 0 ]; then
+            echo "::notice::The change needs no documentation."
+            exit 0
+          fi
+
+          base_ref="$(git rev-parse --abbrev-ref HEAD)"
+          git_remote push origin "refs/heads/$BRANCH"
+          gh pr create --base "$base_ref" --head "$BRANCH" \
+            --title "docs: document the change in ${SOURCE_SHA:0:7}" \
+            --body "Opened by a Sortie run for $SOURCE_COMMIT_URL. Review the changes before merging."

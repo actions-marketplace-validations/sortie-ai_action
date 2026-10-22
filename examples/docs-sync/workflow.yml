@@ -1,0 +1,71 @@
+name: Docs sync
+
+on:
+  schedule:
+    - cron: '0 6 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: sortie-docs-sync
+  cancel-in-progress: false
+
+jobs:
+  docs-sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+      - name: Install Claude Code
+        run: npm install -g --ignore-scripts=false @anthropic-ai/claude-code
+
+      - uses: sortie-ai/action@v1
+        id: sortie
+        with:
+          workflow: .github/sortie/docs-sync/WORKFLOW.md
+          title: Bring the documentation in line with the code
+          task: |
+            Compare the documentation in this repository with the code it
+            describes. Fix every statement the code has made false: commands,
+            flags, configuration keys, file paths, and examples. Do not add
+            new sections or reword text that is still true.
+          version: v1.30.0
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          SORTIE_CHECKOUT_DIR: ${{ github.workspace }}
+
+      # The token reaches Git only in this step, after the agent has finished.
+      # A pull request opened with GITHUB_TOKEN starts no pull_request
+      # workflows, so its checks stay pending until a person pushes to it.
+      - name: Publish the result
+        if: steps.sortie.outputs.outcome == 'succeeded'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          BRANCH: sortie/gha-${{ github.run_id }}-${{ github.run_attempt }}
+          BASE_REF: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          git_remote() {
+            git -c credential.helper= -c 'credential.helper=!gh auth git-credential' "$@"
+          }
+
+          if ! git rev-parse --verify --quiet "refs/heads/$BRANCH" > /dev/null ||
+            [ "$(git rev-list --count "HEAD..refs/heads/$BRANCH")" = 0 ]; then
+            echo "::notice::The documentation already matches the code."
+            exit 0
+          fi
+
+          git_remote push origin "refs/heads/$BRANCH"
+          gh pr create --base "$BASE_REF" --head "$BRANCH" \
+            --title "docs: bring the documentation in line with the code" \
+            --body "Opened by a scheduled Sortie run. Review the changes before merging."

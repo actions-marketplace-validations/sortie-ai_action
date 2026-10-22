@@ -1,0 +1,115 @@
+name: Dependabot fix
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Run the tests
+        run: make test
+
+  fix:
+    needs: test
+    # github.actor changes when a person reruns the workflow; the author does not.
+    if: failure() && github.event.pull_request.user.login == 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: write
+      pull-requests: write
+      actions: read
+    concurrency:
+      group: sortie-dependabot-fix-${{ github.event.pull_request.number }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+      - name: Install Claude Code
+        run: npm install -g --ignore-scripts=false @anthropic-ai/claude-code
+
+      - name: Collect the log of the failed jobs
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          TASK_FILE: ${{ runner.temp }}/failure-task.md
+        run: |
+          set -euo pipefail
+          {
+            printf 'Fix the failing checks of the Dependabot pull request "%s" (%s).\n\n' "$PR_TITLE" "$PR_URL"
+            gh api --paginate "repos/$GH_REPO/actions/runs/$RUN_ID/jobs" \
+              --jq '.jobs[] | select(.conclusion == "failure") | .id' |
+              while read -r job_id; do
+                gh run view --job "$job_id" --log-failed | tail -n 300
+              done
+          } > "$TASK_FILE"
+
+      - uses: sortie-ai/action@v1
+        id: sortie
+        with:
+          workflow: .github/sortie/dependabot-fix/WORKFLOW.md
+          task-file: ${{ runner.temp }}/failure-task.md
+          title: Fix the checks of Dependabot pull request ${{ github.event.pull_request.number }}
+          version: v1.30.0
+        env:
+          # Dependabot-triggered runs read Dependabot secrets, not Actions secrets.
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          SORTIE_CHECKOUT_DIR: ${{ github.workspace }}
+
+      # The token reaches Git only in this step, after the agent has finished.
+      - name: Publish the result
+        if: steps.sortie.outputs.outcome == 'succeeded'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          BRANCH: sortie/gha-${{ github.run_id }}-${{ github.run_attempt }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          git_remote() {
+            git -c credential.helper= -c 'credential.helper=!gh auth git-credential' "$@"
+          }
+
+          if ! git rev-parse --verify --quiet "refs/heads/$BRANCH" > /dev/null ||
+            [ "$(git rev-list --count "HEAD..refs/heads/$BRANCH")" = 0 ]; then
+            echo "::notice::The agent left no commit to publish."
+            exit 0
+          fi
+
+          # Dependabot reads its configuration from the base branch, so an
+          # ignore rule on the pull request branch would have no effect.
+          if git diff --quiet HEAD "refs/heads/$BRANCH" -- .github/dependabot.yml; then
+            git_remote push origin "refs/heads/$BRANCH:refs/heads/$HEAD_REF"
+            exit 0
+          fi
+
+          ignore_branch="$BRANCH-ignore"
+          git_remote fetch --quiet --no-tags --depth=1 origin "$BASE_REF"
+          git switch --quiet -c "$ignore_branch" FETCH_HEAD
+          git checkout --quiet "refs/heads/$BRANCH" -- .github/dependabot.yml
+          git \
+            -c user.name=github-actions[bot] \
+            -c user.email=41898282+github-actions[bot]@users.noreply.github.com \
+            commit --quiet -m "chore(deps): ignore the version of pull request $PR_NUMBER"
+          git_remote push origin "$ignore_branch"
+          gh pr create --base "$BASE_REF" --head "$ignore_branch" \
+            --title "Ignore the dependency version of pull request $PR_NUMBER" \
+            --body "The update in #$PR_NUMBER fails its checks and no small change fixes it."
