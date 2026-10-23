@@ -148,7 +148,7 @@ fi
 case ${RUNNER_ARCH-} in
     X64)   arch=amd64 ;;
     ARM64) arch=arm64 ;;
-    *)     fail "unsupported runner architecture: ${RUNNER_ARCH-}" ;;
+    *)     fail "unsupported runner architecture: ${RUNNER_ARCH-}; Sortie runs on X64 and ARM64 runners" ;;
 esac
 case ${RUNNER_OS-} in
     Linux)   os=linux ;;
