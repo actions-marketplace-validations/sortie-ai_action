@@ -26,14 +26,15 @@ finish() {
   exit "$1"
 }
 
-# The inputs reach jq through files: a jq argument would put the task text on a
-# command line, and jq on Windows reads its environment in the ANSI code page,
-# which mangles any non-ASCII text.
+# The inputs reach jq as base64 files. A jq argument would put the task text on
+# a command line; jq on Windows reads its environment in the ANSI code page and
+# opens files in text mode, which mangle non-ASCII text and CRLF line endings.
 # shellcheck disable=SC2016 # the jq variables are not shell expansions
 task_filter='
   def trim: gsub("\\A\\s+|\\s+\\z"; "");
-  if ($text | test("\\S") | not) then ("" | halt_error(3)) else . end
-  | ($title | trim) as $title
+  ($text | @base64d) as $text
+  | if ($text | test("\\S") | not) then ("" | halt_error(3)) else . end
+  | ($title | @base64d | trim) as $title
   | [{
       id: $id,
       identifier: $id,
@@ -41,16 +42,23 @@ task_filter='
               else ($text | split("\n") | map(select(test("\\S"))) | first | trim | .[0:200]) end),
       description: $text,
       state: "To Do",
-      labels: ($labels | split(",") | map(trim | select(. != "")))
+      labels: ($labels | @base64d | split(",") | map(trim | select(. != "")))
     }]'
 
+encode() {
+  base64 | tr -d '\r\n' >"$run_dir/$1"
+}
+
 write_task_file() {
-  local text=${SA_TASK_FILE:-$run_dir/text}
-  [[ -n ${SA_TASK_FILE:-} ]] || printf '%s' "${SA_TASK:-}" >"$text" || return 1
-  printf '%s' "${SA_TITLE:-}" >"$run_dir/title" || return 1
-  printf '%s' "${SA_LABELS:-}" >"$run_dir/labels" || return 1
+  if [[ -n ${SA_TASK_FILE:-} ]]; then
+    encode text <"$(to_posix "$SA_TASK_FILE")" || return 1
+  else
+    printf '%s' "${SA_TASK:-}" | encode text || return 1
+  fi
+  printf '%s' "${SA_TITLE:-}" | encode title || return 1
+  printf '%s' "${SA_LABELS:-}" | encode labels || return 1
   jq -n --arg id "$id" \
-    --rawfile text "$(to_native "$text")" \
+    --rawfile text "$(to_native "$run_dir/text")" \
     --rawfile title "$(to_native "$run_dir/title")" \
     --rawfile labels "$(to_native "$run_dir/labels")" \
     "$task_filter" >"$task_path" 2>/dev/null
