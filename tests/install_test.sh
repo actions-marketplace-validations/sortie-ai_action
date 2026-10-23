@@ -1,21 +1,36 @@
 #!/usr/bin/env bash
-# Runs scripts/install.sh against a real release, so it needs network access.
+# Runs scripts/install.sh against a fixture release, because every download
+# of a real release counts in Sortie's public download statistics.
 set -eu
 
 root=$(cd "$(dirname "$0")/.." && pwd)
 tag=v1.29.0
-case "$(uname -m)" in
-  x86_64) arch=amd64 ;;
-  aarch64 | arm64) arch=arm64 ;;
-  *) echo "unsupported architecture $(uname -m)" >&2; exit 1 ;;
-esac
-archive="sortie_${tag#v}_linux_${arch}.tar.gz"
+archive="sortie_${tag#v}_linux_amd64.tar.gz"
 
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
-mkdir "$work/stub" "$work/fake"
+mkdir "$work/stub" "$work/fake" "$work/release"
 printf '#!/bin/sh\necho "$*" >> "%s/gh.calls"\nexit 1\n' "$work" > "$work/stub/gh"
 chmod +x "$work/stub/gh"
+
+printf '#!/bin/sh\necho "sortie %s"\n' "${tag#v}" > "$work/release/sortie"
+chmod +x "$work/release/sortie"
+tar -czf "$work/release/$archive" -C "$work/release" sortie
+(cd "$work/release" && sha256sum "$archive" > checksums.txt)
+
+cat > "$work/stub/curl" <<EOF
+#!/bin/sh
+for a; do
+  shift
+  case \$a in
+    https://github.com/sortie-ai/sortie/releases/download/$tag/*) a="file://$work/release/\${a##*/}" ;;
+    *://*) echo "unexpected URL \$a" >&2; exit 2 ;;
+  esac
+  set -- "\$@" "\$a"
+done
+exec $(command -v curl) "\$@"
+EOF
+chmod +x "$work/stub/curl"
 
 run_install() {
   env SA_TAG="$tag" SA_ARCHIVE="$archive" SA_CACHE_DIR="$work/cache" \

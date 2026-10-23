@@ -86,6 +86,13 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: bash scripts/prepare.sh
 
+      - name: Restore Sortie archive
+        id: restore
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ steps.prepare.outputs.cache-dir }}
+          key: sortie-${{ steps.prepare.outputs.tag }}-${{ runner.os }}-${{ runner.arch }}
+
       - name: Install Sortie
         id: install
         env:
@@ -96,6 +103,13 @@ jobs:
           SA_VERIFY: ${{ steps.prepare.outputs.verify }}
           GH_TOKEN: ${{ github.token }}
         run: bash scripts/install.sh
+
+      - name: Save Sortie archive
+        if: steps.restore.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ steps.prepare.outputs.cache-dir }}
+          key: sortie-${{ steps.prepare.outputs.tag }}-${{ runner.os }}-${{ runner.arch }}
 
       - name: Validate workflow files
         env:

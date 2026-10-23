@@ -72,6 +72,8 @@ jobs:
 
   behavior:
     name: Behavior (${{ matrix.os }})
+    needs: version
+    if: ${{ !cancelled() }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 15
     permissions:
@@ -169,6 +171,8 @@ jobs:
 
   cancel:
     name: Cancel (${{ matrix.os }})
+    needs: version
+    if: ${{ !cancelled() }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 15
     permissions:
