@@ -156,10 +156,15 @@ jobs:
       - name: Check the payload stayed data
         run: |
           want=$(base64 -w0 "$RUNNER_TEMP/payload.txt")
+          status=0
           for suffix in p5task p5file; do
             got=$(jq -r '.[0].description | @base64' "${RUNNER_TEMP}-${suffix}/task.json" | tr -d '\r\n')
-            [ "$got" = "$want" ] || { echo "$suffix: description differs from the payload"; exit 1; }
+            [ "$got" = "$want" ] && continue
+            echo "$suffix: description differs from the payload"
+            diff <(base64 -d <<<"$want" | od -c) <(base64 -d <<<"$got" | od -c) || true
+            status=1
           done
+          [ "$status" = 0 ] || exit 1
           [ ! -e /tmp/sa-canary ] || { echo "payload text was executed"; exit 1; }
 
       - name: Check no state reached the checkout
