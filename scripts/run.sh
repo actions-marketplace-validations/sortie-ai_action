@@ -26,14 +26,14 @@ finish() {
   exit "$1"
 }
 
-# The task text stays in the environment and in the file; a jq argument would
-# put it on a command line.
-# shellcheck disable=SC2016 # $ENV and the jq variables are not shell expansions
+# The inputs reach jq through files: a jq argument would put the task text on a
+# command line, and jq on Windows reads its environment in the ANSI code page,
+# which mangles any non-ASCII text.
+# shellcheck disable=SC2016 # the jq variables are not shell expansions
 task_filter='
   def trim: gsub("\\A\\s+|\\s+\\z"; "");
-  ($file | if . == "" then ($ENV.SA_TASK // "") else . end) as $text
-  | if ($text | test("\\S") | not) then ("" | halt_error(3)) else . end
-  | (($ENV.SA_TITLE // "") | trim) as $title
+  if ($text | test("\\S") | not) then ("" | halt_error(3)) else . end
+  | ($title | trim) as $title
   | [{
       id: $id,
       identifier: $id,
@@ -41,19 +41,19 @@ task_filter='
               else ($text | split("\n") | map(select(test("\\S"))) | first | trim | .[0:200]) end),
       description: $text,
       state: "To Do",
-      labels: (($ENV.SA_LABELS // "") | split(",") | map(trim | select(. != "")))
+      labels: ($labels | split(",") | map(trim | select(. != "")))
     }]'
 
 write_task_file() {
-  local file=
-  if [[ -n ${SA_TASK_FILE:-} ]]; then
-    file=$(to_native "$SA_TASK_FILE")
-  fi
-  if [[ -n $file ]]; then
-    jq -n --arg id "$id" --rawfile file "$file" "$task_filter" >"$task_path" 2>/dev/null
-  else
-    jq -n --arg id "$id" --arg file '' "$task_filter" >"$task_path" 2>/dev/null
-  fi
+  local text=${SA_TASK_FILE:-$run_dir/text}
+  [[ -n ${SA_TASK_FILE:-} ]] || printf '%s' "${SA_TASK:-}" >"$text" || return 1
+  printf '%s' "${SA_TITLE:-}" >"$run_dir/title" || return 1
+  printf '%s' "${SA_LABELS:-}" >"$run_dir/labels" || return 1
+  jq -n --arg id "$id" \
+    --rawfile text "$(to_native "$text")" \
+    --rawfile title "$(to_native "$run_dir/title")" \
+    --rawfile labels "$(to_native "$run_dir/labels")" \
+    "$task_filter" >"$task_path" 2>/dev/null
 }
 
 # Sortie runs as a child so this script survives to write the outputs.

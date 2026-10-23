@@ -23,7 +23,7 @@ dispatch:
         turn_delay_ms: 600000
 hooks:
   after_run: |-
-    if not exist %SORTIE_TEST_DIR% mkdir %SORTIE_TEST_DIR% & echo %SORTIE_RUN_OUTCOME%> %SORTIE_TEST_DIR%\outcome.txt & copy /y %SORTIE_ACTION_TASK_FILE% %SORTIE_TEST_DIR%\task.json
+    if not exist %SORTIE_TEST_DIR% mkdir %SORTIE_TEST_DIR% & (echo %SORTIE_RUN_OUTCOME%)> %SORTIE_TEST_DIR%\outcome.txt & copy /y %SORTIE_ACTION_TASK_FILE% %SORTIE_TEST_DIR%\task.json
 price_table:
   fetch: false
 ---
