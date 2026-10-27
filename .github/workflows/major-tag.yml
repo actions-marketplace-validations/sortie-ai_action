@@ -1,0 +1,43 @@
+name: Major tag
+
+on:
+  push:
+    tags:
+      - v[0-9]+.[0-9]+.[0-9]+
+
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+jobs:
+  move:
+    name: Move the major tag
+    if: github.event.created
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      GH_TOKEN: ${{ secrets.CICDBOT_TOKEN }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - name: Move the major tag
+        run: |
+          semver='^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'
+          if [[ ! "$GITHUB_REF_NAME" =~ $semver ]]; then
+            echo "::error::$GITHUB_REF_NAME is not an exact version"
+            exit 1
+          fi
+          major="v${BASH_REMATCH[1]}"
+          latest=$(gh api --paginate "repos/{owner}/{repo}/git/matching-refs/tags/$major." --jq '.[].ref | ltrimstr("refs/tags/")' | grep -E "$semver" | sort -V | tail -n 1)
+          if [ "$latest" != "$GITHUB_REF_NAME" ]; then
+            echo "::notice::$major stays on $latest, which is newer than $GITHUB_REF_NAME"
+            exit 0
+          fi
+          commit=$(gh api "repos/{owner}/{repo}/commits/$GITHUB_REF" --jq .sha)
+          if gh api "repos/{owner}/{repo}/git/ref/tags/$major" > /dev/null 2>&1; then
+            gh api --silent --method PATCH "repos/{owner}/{repo}/git/refs/tags/$major" -f sha="$commit" -F force=true
+          else
+            gh api --silent "repos/{owner}/{repo}/git/refs" -f ref="refs/tags/$major" -f sha="$commit"
+          fi
+          echo "::notice::$major now points to $GITHUB_REF_NAME ($commit)"

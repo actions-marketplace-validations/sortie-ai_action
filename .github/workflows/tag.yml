@@ -1,0 +1,50 @@
+name: Tag
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version to tag on the latest commit of main, for example v1.2.3
+        required: true
+        type: string
+
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+jobs:
+  tag:
+    name: Tag
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - name: Check the request
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          if [ "$GITHUB_REF" != refs/heads/main ]; then
+            echo "::error::Run this workflow on main"
+            exit 1
+          fi
+          if [[ ! "$VERSION" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "::error::The version must look like v1.2.3"
+            exit 1
+          fi
+
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Push the tag
+        env:
+          GH_TOKEN: ${{ secrets.CICDBOT_TOKEN }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          gh auth setup-git
+          git tag "$VERSION"
+          git push origin "refs/tags/$VERSION"
