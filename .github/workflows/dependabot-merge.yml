@@ -1,0 +1,23 @@
+# yaml-language-server: $schema=https://www.schemastore.org/github-workflow.json
+name: Dependabot auto-merge
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types:
+      - completed
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  dependabot:
+    # cicdbot pushes the rebuilt dashboard bundle onto Dependabot PRs, which
+    # starts the CI run that decides the merge.
+    if: ${{ github.actor == 'dependabot[bot]' || github.actor == 'dependabot-preview[bot]' || github.actor == 'cicdbot' }}
+    uses: sortie-ai/shared-workflows/.github/workflows/dependabot-merge.yml@6d471deb70b0fee52d42366fb84f76b95d8f957a # v1.2.0
+    with:
+      trusted-pushers: cicdbot
+    secrets:
+      bot-token: ${{ secrets.CICDBOT_TOKEN }}
