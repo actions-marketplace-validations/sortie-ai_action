@@ -67,8 +67,6 @@ jobs:
           SORTIE_CHECKOUT_DIR: ${{ github.workspace }}
 ```
 
-The agent runs the updated dependency's code, so its job holds no write token. The [Dependabot example](examples/dependabot-fix) pushes the fix from a separate job.
-
 ### Inputs
 
 | Input | Default | Description |
@@ -96,7 +94,7 @@ The agent runs the updated dependency's code, so its job holds no write token. T
 
 ## Documentation
 
-See the [Sortie documentation](https://docs.sortie-ai.com) for workflow files, agents, and credentials.
+[How to Run Sortie in GitHub Actions](https://docs.sortie-ai.com/guides/run-sortie-in-github-actions/)
 
 ## License
 
