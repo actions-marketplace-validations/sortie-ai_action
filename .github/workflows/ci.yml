@@ -55,7 +55,7 @@ jobs:
           annotations: true
 
   validate:
-    name: Validate Sortie workflow files
+    name: Validate
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
