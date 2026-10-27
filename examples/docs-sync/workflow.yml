@@ -44,8 +44,6 @@ jobs:
           SORTIE_CHECKOUT_DIR: ${{ github.workspace }}
 
       # The token reaches Git only in this step, after the agent has finished.
-      # A pull request opened with GITHUB_TOKEN starts no pull_request
-      # workflows, so its checks stay pending until a person pushes to it.
       - name: Publish the result
         if: steps.sortie.outputs.outcome == 'succeeded'
         env:

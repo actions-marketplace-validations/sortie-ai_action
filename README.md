@@ -33,13 +33,15 @@ on:
 jobs:
   fix-dependabot:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     if: >-
       github.event.workflow_run.conclusion == 'failure' &&
+      github.event.workflow_run.event == 'pull_request' &&
       github.event.workflow_run.actor.login == 'dependabot[bot]' &&
       github.event.workflow_run.head_repository.full_name == github.repository
-    
+
     permissions:
-      contents: write
+      contents: read
       actions: read
 
     steps:
@@ -50,21 +52,22 @@ jobs:
 
       - run: npm install -g @anthropic-ai/claude-code
 
-      - run: gh run view "$RUN_ID" --log-failed > "$RUNNER_TEMP/failure.log"
+      - run: gh run view "$RUN_ID" --log-failed | tail -n 300 > "$RUNNER_TEMP/failure.log"
         env:
           GH_TOKEN: ${{ github.token }}
           RUN_ID: ${{ github.event.workflow_run.id }}
 
       - uses: sortie-ai/action@v1
         with:
-          workflow: .sortie/WORKFLOW.md
-          title: Fix '${{ github.event.workflow_run.display_title }}' dependabot update
+          workflow: .github/sortie/dependabot-fix/WORKFLOW.md
+          title: Fix the checks of ${{ github.event.workflow_run.display_title }}
           task-file: ${{ runner.temp }}/failure.log
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          SORTIE_CHECKOUT_DIR: ${{ github.workspace }}
 ```
 
-The [examples](#examples) show how to push the fix and open a pull request.
+The agent runs the updated dependency's code, so its job holds no write token. The [Dependabot example](examples/dependabot-fix) pushes the fix from a separate job.
 
 ### Inputs
 

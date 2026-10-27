@@ -1,38 +1,34 @@
 name: Dependabot fix
 
 on:
-  pull_request:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
 
-permissions:
-  contents: read
+permissions: {}
+
+concurrency:
+  group: sortie-dependabot-fix-${{ github.event.workflow_run.head_branch }}
+  cancel-in-progress: false
 
 jobs:
-  test:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - name: Run the tests
-        run: make test
-
   fix:
-    needs: test
-    # github.actor changes when a person reruns the workflow; the author does not.
-    if: failure() && github.event.pull_request.user.login == 'dependabot[bot]'
+    if: >-
+      github.event.workflow_run.conclusion == 'failure' &&
+      github.event.workflow_run.event == 'pull_request' &&
+      github.event.workflow_run.actor.login == 'dependabot[bot]' &&
+      github.event.workflow_run.head_repository.full_name == github.repository
     runs-on: ubuntu-latest
     timeout-minutes: 45
     permissions:
-      contents: write
-      pull-requests: write
+      contents: read
       actions: read
-    concurrency:
-      group: sortie-dependabot-fix-${{ github.event.pull_request.number }}
-      cancel-in-progress: false
+    outputs:
+      fix: ${{ steps.save.outputs.fix }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.event.pull_request.head.sha }}
+          ref: ${{ github.event.workflow_run.head_sha }}
           persist-credentials: false
 
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
@@ -45,71 +41,75 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-          RUN_ID: ${{ github.run_id }}
-          PR_TITLE: ${{ github.event.pull_request.title }}
-          PR_URL: ${{ github.event.pull_request.html_url }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+          RUN_TITLE: ${{ github.event.workflow_run.display_title }}
           TASK_FILE: ${{ runner.temp }}/failure-task.md
         run: |
           set -euo pipefail
           {
-            printf 'Fix the failing checks of the Dependabot pull request "%s" (%s).\n\n' "$PR_TITLE" "$PR_URL"
-            gh api --paginate "repos/$GH_REPO/actions/runs/$RUN_ID/jobs" \
-              --jq '.jobs[] | select(.conclusion == "failure") | .id' |
-              while read -r job_id; do
-                gh run view --job "$job_id" --log-failed | tail -n 300
-              done
+            printf 'Fix the failing checks of the Dependabot pull request "%s".\n\n' "$RUN_TITLE"
+            gh run view "$RUN_ID" --log-failed | tail -n 300
           } > "$TASK_FILE"
 
       - uses: sortie-ai/action@v1
-        id: sortie
         with:
           workflow: .github/sortie/dependabot-fix/WORKFLOW.md
           task-file: ${{ runner.temp }}/failure-task.md
-          title: Fix the checks of Dependabot pull request ${{ github.event.pull_request.number }}
+          title: Fix the checks of ${{ github.event.workflow_run.display_title }}
           version: v1.30.0
         env:
-          # Dependabot-triggered runs read Dependabot secrets, not Actions secrets.
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           SORTIE_CHECKOUT_DIR: ${{ github.workspace }}
 
-      # The token reaches Git only in this step, after the agent has finished.
-      - name: Publish the result
-        if: steps.sortie.outputs.outcome == 'succeeded'
+      - name: Save the fix
+        id: save
         env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
           BRANCH: sortie/gha-${{ github.run_id }}-${{ github.run_attempt }}
-          HEAD_REF: ${{ github.event.pull_request.head.ref }}
-          BASE_REF: ${{ github.event.pull_request.base.ref }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
+          BUNDLE: ${{ runner.temp }}/fix/fix.bundle
         run: |
           set -euo pipefail
-          git_remote() {
-            git -c credential.helper= -c 'credential.helper=!gh auth git-credential' "$@"
-          }
-
           if ! git rev-parse --verify --quiet "refs/heads/$BRANCH" > /dev/null ||
             [ "$(git rev-list --count "HEAD..refs/heads/$BRANCH")" = 0 ]; then
             echo "::notice::The agent left no commit to publish."
             exit 0
           fi
+          mkdir -p "$(dirname "$BUNDLE")"
+          git bundle create "$BUNDLE" "HEAD..refs/heads/$BRANCH"
+          echo "fix=true" >> "$GITHUB_OUTPUT"
 
-          # Dependabot reads its configuration from the base branch, so an
-          # ignore rule on the pull request branch would have no effect.
-          if git diff --quiet HEAD "refs/heads/$BRANCH" -- .github/dependabot.yml; then
-            git_remote push origin "refs/heads/$BRANCH:refs/heads/$HEAD_REF"
-            exit 0
-          fi
+      - if: steps.save.outputs.fix == 'true'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: fix
+          path: ${{ runner.temp }}/fix/fix.bundle
+          retention-days: 1
 
-          ignore_branch="$BRANCH-ignore"
-          git_remote fetch --quiet --no-tags --depth=1 origin "$BASE_REF"
-          git switch --quiet -c "$ignore_branch" FETCH_HEAD
-          git checkout --quiet "refs/heads/$BRANCH" -- .github/dependabot.yml
-          git \
-            -c user.name=github-actions[bot] \
-            -c user.email=41898282+github-actions[bot]@users.noreply.github.com \
-            commit --quiet -m "chore(deps): ignore the version of pull request $PR_NUMBER"
-          git_remote push origin "$ignore_branch"
-          gh pr create --base "$BASE_REF" --head "$ignore_branch" \
-            --title "Ignore the dependency version of pull request $PR_NUMBER" \
-            --body "The update in #$PR_NUMBER fails its checks and no small change fixes it."
+  publish:
+    needs: fix
+    if: needs.fix.outputs.fix == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          persist-credentials: false
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: fix
+          path: ${{ runner.temp }}/fix
+
+      - name: Push the fix to the pull request branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BRANCH: sortie/gha-${{ github.run_id }}-${{ github.run_attempt }}
+          HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
+          BUNDLE: ${{ runner.temp }}/fix/fix.bundle
+        run: |
+          set -euo pipefail
+          git fetch --quiet "$BUNDLE" "refs/heads/$BRANCH"
+          git -c credential.helper= -c 'credential.helper=!gh auth git-credential' \
+            push origin "FETCH_HEAD:refs/heads/$HEAD_BRANCH"
